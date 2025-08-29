@@ -4,3 +4,7 @@ pytube>=15.0.0
 yt-dlp>=2024.8.6
 requests>=2.31.0
 urllib3>=2.0.0
+
+# ASR용 (로컬 Whisper)
+faster-whisper>=1.0.1
+ffmpeg-python>=0.2.0
