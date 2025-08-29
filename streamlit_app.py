@@ -1,8 +1,9 @@
 diff --git a/streamlit_app.py b/streamlit_app.py
-index 7bc0049f3d82ef4ce7b425384cd595140678b80c..f6d06f62b20ad7fe604e4d5bdb76c3f35e6dfd87 100644
+index 7bc0049f3d82ef4ce7b425384cd595140678b80c..21c8a91b51087a03a81c799048967218fd70ac4c 100644
 --- a/streamlit_app.py
 +++ b/streamlit_app.py
-@@ -1,49 +1,55 @@
+@@ -1,49 +1,56 @@
++#!/usr/bin/env python3
  import re
  import random
  from time import sleep
@@ -59,10 +60,10 @@ index 7bc0049f3d82ef4ce7b425384cd595140678b80c..f6d06f62b20ad7fe604e4d5bdb76c3f3
              vid = parse_qs(parsed.query).get("v", [None])[0]
              if vid and len(vid) == 11:
 diff --git a/streamlit_app.py b/streamlit_app.py
-index 7bc0049f3d82ef4ce7b425384cd595140678b80c..f6d06f62b20ad7fe604e4d5bdb76c3f35e6dfd87 100644
+index 7bc0049f3d82ef4ce7b425384cd595140678b80c..21c8a91b51087a03a81c799048967218fd70ac4c 100644
 --- a/streamlit_app.py
 +++ b/streamlit_app.py
-@@ -61,95 +67,95 @@ def to_clean_watch_url(url_or_id: str) -> str:
+@@ -61,95 +68,95 @@ def to_clean_watch_url(url_or_id: str) -> str:
      """짧은 주소/파라미터를 표준 watch URL로 정리."""
      vid = extract_video_id(url_or_id) if "http" in url_or_id else url_or_id
      return f"https://www.youtube.com/watch?v={vid}" if vid else url_or_id
@@ -165,10 +166,10 @@ index 7bc0049f3d82ef4ce7b425384cd595140678b80c..f6d06f62b20ad7fe604e4d5bdb76c3f3
      """pytube 자막 트랙에서 추출 (조용한 버전)."""
      url = to_clean_watch_url(url_or_id)
 diff --git a/streamlit_app.py b/streamlit_app.py
-index 7bc0049f3d82ef4ce7b425384cd595140678b80c..f6d06f62b20ad7fe604e4d5bdb76c3f35e6dfd87 100644
+index 7bc0049f3d82ef4ce7b425384cd595140678b80c..21c8a91b51087a03a81c799048967218fd70ac4c 100644
 --- a/streamlit_app.py
 +++ b/streamlit_app.py
-@@ -218,51 +224,51 @@ def fetch_via_pytube(url_or_id: str, langs: List[str]) -> str:
+@@ -218,51 +225,51 @@ def fetch_via_pytube(url_or_id: str, langs: List[str]) -> str:
                              h, m, s_ms = ts.split(":")
                              s, ms = s_ms.split(",")
                              start = int(h) * 3600 + int(m) * 60 + int(s) + int(ms) / 1000.0
@@ -222,10 +223,10 @@ index 7bc0049f3d82ef4ce7b425384cd595140678b80c..f6d06f62b20ad7fe604e4d5bdb76c3f3
          
          text = " ".join(rows[1:]).strip()
 diff --git a/streamlit_app.py b/streamlit_app.py
-index 7bc0049f3d82ef4ce7b425384cd595140678b80c..f6d06f62b20ad7fe604e4d5bdb76c3f35e6dfd87 100644
+index 7bc0049f3d82ef4ce7b425384cd595140678b80c..21c8a91b51087a03a81c799048967218fd70ac4c 100644
 --- a/streamlit_app.py
 +++ b/streamlit_app.py
-@@ -331,51 +337,51 @@ def fetch_via_ytdlp_enhanced(url_or_id: str, langs: List[str]) -> str:
+@@ -331,51 +338,51 @@ def fetch_via_ytdlp_enhanced(url_or_id: str, langs: List[str]) -> str:
      url = to_clean_watch_url(url_or_id)
      
      # 더 관대한 설정
@@ -279,10 +280,10 @@ index 7bc0049f3d82ef4ce7b425384cd595140678b80c..f6d06f62b20ad7fe604e4d5bdb76c3f3
      
      # 4순위: 다른 언어라도 시도 (첫 번째 가능한 것)
 diff --git a/streamlit_app.py b/streamlit_app.py
-index 7bc0049f3d82ef4ce7b425384cd595140678b80c..f6d06f62b20ad7fe604e4d5bdb76c3f35e6dfd87 100644
+index 7bc0049f3d82ef4ce7b425384cd595140678b80c..21c8a91b51087a03a81c799048967218fd70ac4c 100644
 --- a/streamlit_app.py
 +++ b/streamlit_app.py
-@@ -437,76 +443,76 @@ def fetch_via_ytdlp_enhanced(url_or_id: str, langs: List[str]) -> str:
+@@ -437,76 +444,76 @@ def fetch_via_ytdlp_enhanced(url_or_id: str, langs: List[str]) -> str:
                      text = re.sub(r"<.*?>", " ", data)
                      text = html.unescape(text)
                      text = re.sub(r"\s+", " ", text).strip()
@@ -367,10 +368,10 @@ index 7bc0049f3d82ef4ce7b425384cd595140678b80c..f6d06f62b20ad7fe604e4d5bdb76c3f3
      lang_pref = st.multiselect(
          "언어 우선순위 (위에서부터 시도)",
 diff --git a/streamlit_app.py b/streamlit_app.py
-index 7bc0049f3d82ef4ce7b425384cd595140678b80c..f6d06f62b20ad7fe604e4d5bdb76c3f35e6dfd87 100644
+index 7bc0049f3d82ef4ce7b425384cd595140678b80c..21c8a91b51087a03a81c799048967218fd70ac4c 100644
 --- a/streamlit_app.py
 +++ b/streamlit_app.py
-@@ -529,67 +535,67 @@ if run:
+@@ -529,67 +536,67 @@ if run:
          st.warning("URL을 입력하세요.")
          st.stop()
  
