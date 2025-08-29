@@ -1,0 +1,3 @@
+streamlit>=1.36
+youtube_transcript_api>=0.6
+pytube>=15.0.0
