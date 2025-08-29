@@ -571,23 +571,20 @@ if run:
                 st.caption(f"영상 정보 조회 실패 ({str(e)[:50]}) - 자막 추출을 계속 진행합니다.")
 
     # 자막 추출
-    with st.spinner("자막 추출 중... (여러 방법을 순차적으로 시도합니다)"):
+    with st.spinner("자막 추출 중..."):
         try:
             transcript_text = fetch_transcript_resilient(clean_url, vid, lang_pref)
+        except TranscriptExtractionError as e:
+            st.error(f"❌ {str(e)}")
+            st.stop()
         except (NoTranscriptFound, TranscriptsDisabled) as e:
-            st.error(f"자막을 찾을 수 없습니다: {str(e)}")
-            st.info("이 영상은 자막이 없거나 비활성화되어 있을 수 있습니다.")
+            st.error(f"❌ 자막을 찾을 수 없습니다: {str(e)}")
             st.stop()
         except VideoUnavailable:
-            st.error("영상에 접근할 수 없습니다. (비공개, 지역제한, 연령제한 등)")
-            st.stop()
-        except TranscriptExtractionError as e:
-            st.error(f"자막 추출 실패: {str(e)}")
-            st.info("문제가 지속되면 다른 영상으로 시도해보세요.")
+            st.error("❌ 영상에 접근할 수 없습니다 (비공개, 지역제한, 연령제한 등)")
             st.stop()
         except Exception as e:
-            st.error(f"예상치 못한 오류가 발생했습니다: {str(e)}")
-            st.info("문제가 지속되면 다른 영상으로 시도해보세요.")
+            st.error(f"❌ 예상치 못한 오류: {str(e)}")
             st.stop()
 
     # 결과 출력
