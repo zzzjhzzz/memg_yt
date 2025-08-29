@@ -537,83 +537,106 @@ def fetch_via_ytdlp_enhanced(url_or_id: str, langs: List[str]) -> str:
     raise TranscriptExtractionError(f"yt-dlp: 자막 추출 실패 (사용가능: {available_langs})")
 
 def fetch_transcript_resilient(url: str, video_id: str, langs: List[str]) -> str:
-    """3단계 폴백으로 자막 가져오기 (개선된 오류 처리)"""
+    """3단계 폴백으로 자막 가져오기 (디버깅 강화 버전)"""
     errors = []
-    has_no_transcript = False
-    has_rate_limit = False
+    method_results = []
     
     # 1) youtube_transcript_api
+    st.write("🔍 YTA 방법 시도 중...")
     try:
         result = fetch_via_yta_with_retry(video_id, langs)
         if result and len(result.strip()) > 0:
+            st.write(f"✅ YTA 성공: {len(result)} 문자")
             return result
+        else:
+            st.write("⚠️ YTA 빈 결과 반환")
+            method_results.append(("YTA", "빈 결과"))
     except (NoTranscriptFound, TranscriptsDisabled) as e:
-        has_no_transcript = True
+        st.write(f"❌ YTA 자막 없음: {str(e)}")
+        method_results.append(("YTA", f"자막 없음: {str(e)}"))
         errors.append(f"YTA: {str(e)}")
-        sleep(2)  # 더 긴 대기
+        sleep(3)
     except VideoUnavailable as e:
+        st.write(f"❌ YTA 영상 접근 불가: {str(e)}")
+        method_results.append(("YTA", f"영상 접근 불가: {str(e)}"))
         errors.append(f"YTA: 영상 접근 불가 - {str(e)}")
-        # 영상 자체에 접근할 수 없으면 다른 방법도 실패할 가능성이 높음
-        with st.expander("상세 오류 정보", expanded=False):
-            st.text(f"1. {errors[0]}")
+        # 영상 접근 불가면 다른 방법도 실패할 가능성이 높음
+        with st.expander("상세 오류 정보", expanded=True):
+            for i, (method, error) in enumerate(method_results, 1):
+                st.text(f"{i}. {method}: {error}")
         raise TranscriptExtractionError("영상에 접근할 수 없습니다 (비공개, 지역제한, 연령제한 등)")
     except TranscriptExtractionError as e:
-        error_msg = str(e).lower()
-        if "429" in error_msg or "too many requests" in error_msg:
-            has_rate_limit = True
+        st.write(f"❌ YTA 처리 실패: {str(e)}")
+        method_results.append(("YTA", f"처리 실패: {str(e)}"))
         errors.append(f"YTA: {str(e)}")
-        sleep(2)
+        sleep(3)
     except Exception as e:
+        st.write(f"❌ YTA 예상치 못한 오류: {str(e)}")
+        method_results.append(("YTA", f"예상치 못한 오류: {str(e)}"))
         errors.append(f"YTA: 예상치 못한 오류 - {str(e)}")
-        sleep(2)
+        sleep(3)
 
     # 2) yt-dlp
+    st.write("🔍 yt-dlp 방법 시도 중...")
     try:
         result = fetch_via_ytdlp_enhanced(url, langs)
         if result and len(result.strip()) > 0:
+            st.write(f"✅ yt-dlp 성공: {len(result)} 문자")
             return result
+        else:
+            st.write("⚠️ yt-dlp 빈 결과 반환")
+            method_results.append(("yt-dlp", "빈 결과"))
     except TranscriptExtractionError as e:
-        error_msg = str(e).lower()
-        if "429" in error_msg or "too many requests" in error_msg:
-            has_rate_limit = True
+        st.write(f"❌ yt-dlp 실패: {str(e)}")
+        method_results.append(("yt-dlp", f"실패: {str(e)}"))
         errors.append(f"yt-dlp: {str(e)}")
-        sleep(2)
+        sleep(3)
     except Exception as e:
+        st.write(f"❌ yt-dlp 예상치 못한 오류: {str(e)}")
+        method_results.append(("yt-dlp", f"예상치 못한 오류: {str(e)}"))
         errors.append(f"yt-dlp: 예상치 못한 오류 - {str(e)}")
-        sleep(2)
+        sleep(3)
 
-    # 3) pytube (마지막 수단)
+    # 3) pytube
+    st.write("🔍 pytube 방법 시도 중...")
     try:
         result = fetch_via_pytube(url, langs)
         if result and len(result.strip()) > 0:
+            st.write(f"✅ pytube 성공: {len(result)} 문자")
             return result
+        else:
+            st.write("⚠️ pytube 빈 결과 반환")
+            method_results.append(("pytube", "빈 결과"))
     except TranscriptExtractionError as e:
+        st.write(f"❌ pytube 실패: {str(e)}")
+        method_results.append(("pytube", f"실패: {str(e)}"))
         errors.append(f"pytube: {str(e)}")
     except Exception as e:
+        st.write(f"❌ pytube 예상치 못한 오류: {str(e)}")
+        method_results.append(("pytube", f"예상치 못한 오류: {str(e)}"))
         errors.append(f"pytube: 예상치 못한 오류 - {str(e)}")
 
-    # 모든 방법 실패 시 - 상세 오류 정보 표시
-    with st.expander("상세 오류 정보", expanded=True):  # 기본으로 열어둠
-        for i, error in enumerate(errors, 1):
-            st.text(f"{i}. {error}")
+    # 상세 분석 결과 표시
+    st.write("📊 **모든 방법 실패 - 원인 분석:**")
+    with st.expander("각 방법별 상세 결과", expanded=True):
+        for i, (method, error) in enumerate(method_results, 1):
+            st.text(f"{i}. {method}: {error}")
     
-    # 더 정확한 오류 분류
-    if has_rate_limit:
-        raise TranscriptExtractionError("YouTube API 요청 제한 (429) - 잠시 후 다시 시도하거나 다른 영상을 사용해주세요")
-    elif has_no_transcript:
-        # 영어 오류 메시지도 체크
-        error_text = " ".join(errors).lower()
-        if any(phrase in error_text for phrase in [
-            "subtitles are disabled", 
-            "no transcript found", 
-            "transcripts disabled",
-            "자막이 없음", 
-            "자막 트랙이 없음"
-        ]):
-            raise TranscriptExtractionError("이 영상에는 자막이 없거나 자막 기능이 비활성화되어 있습니다")
+    # 오류 패턴 분석
+    all_errors_text = " ".join(errors).lower()
     
-    # 일반적인 실패
-    raise TranscriptExtractionError("모든 자막 추출 방법이 실패했습니다 - 위의 상세 정보를 확인하세요")
+    if any(phrase in all_errors_text for phrase in ["429", "too many requests", "rate limit"]):
+        st.error("🚫 **실제 원인**: YouTube API 요청 제한 (429)")
+        raise TranscriptExtractionError("YouTube에서 요청을 제한하고 있습니다. 잠시 후 다시 시도하거나 VPN 사용을 고려해보세요.")
+    elif any(phrase in all_errors_text for phrase in ["400", "bad request", "http error"]):
+        st.error("🚫 **실제 원인**: API 접근 차단 (400)")
+        raise TranscriptExtractionError("YouTube에서 봇 접근을 차단하고 있습니다. 다른 네트워크나 VPN 사용을 시도해보세요.")
+    elif any(phrase in all_errors_text for phrase in ["subtitles are disabled", "no transcript found"]):
+        st.error("🚫 **실제 원인**: 자막 비활성화")
+        raise TranscriptExtractionError("이 영상에는 자막이 없거나 자막 기능이 비활성화되어 있습니다.")
+    else:
+        st.error("🚫 **알 수 없는 원인**")
+        raise TranscriptExtractionError("알 수 없는 이유로 모든 자막 추출 방법이 실패했습니다.")
 
 # ---------------------------------
 # Streamlit UI
