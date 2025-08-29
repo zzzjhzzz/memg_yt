@@ -1,3 +1,4 @@
 streamlit>=1.36
 youtube_transcript_api==0.6.1
 pytube>=15.0.0
+yt-dlp>=2024.8.6
