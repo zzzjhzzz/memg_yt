@@ -1,5 +1,6 @@
 import re
-import time
+import random
+from time import sleep
 import html
 from typing import Optional, List
 from urllib.parse import urlparse, parse_qs
@@ -88,26 +89,42 @@ def safe_get_youtube_info(url: str):
 # ---------------------------------
 # 1) youtube_transcript_api (공식/자동생성)
 # ---------------------------------
-def fetch_via_yta(video_id: str, langs: List[str]) -> str:
-    """업로더 자막 → 자동생성 자막 순으로 시도."""
-    try:
-        tl = YouTubeTranscriptApi.list_transcripts(video_id)
-        
-        # 업로더 자막 먼저 시도
+def fetch_via_yta_with_retry(video_id: str, langs: List[str], max_retries: int = 3) -> str:
+    """재시도 로직이 포함된 YTA 자막 추출"""
+    for attempt in range(max_retries):
         try:
-            tr = tl.find_transcript(langs)
-        except Exception:
-            # 자동생성 자막으로 폴백
-            tr = tl.find_generated_transcript(langs)
-        
-        entries = tr.fetch()
-        st.success(f"자막 확보(yta): lang={tr.language}, auto={tr.is_generated}")
-        return "\n".join([f"[{e['start']:.1f}] {e['text']}" for e in entries])
-    except (NoTranscriptFound, TranscriptsDisabled, VideoUnavailable):
-        # 원본 예외를 그대로 재발생
-        raise
-    except Exception as e:
-        raise TranscriptExtractionError(f"YTA 방식 실패: {str(e)}")
+            tl = YouTubeTranscriptApi.list_transcripts(video_id)
+            
+            # 업로더 자막 먼저 시도
+            try:
+                tr = tl.find_transcript(langs)
+            except Exception:
+                # 자동생성 자막으로 폴백
+                tr = tl.find_generated_transcript(langs)
+            
+            entries = tr.fetch()
+            st.success(f"자막 확보(yta): lang={tr.language}, auto={tr.is_generated}")
+            return "\n".join([f"[{e['start']:.1f}] {e['text']}" for e in entries])
+            
+        except Exception as e:
+            error_msg = str(e).lower()
+            
+            if "too many requests" in error_msg or "429" in error_msg:
+                if attempt < max_retries - 1:
+                    wait_time = (2 ** attempt) + random.uniform(1, 3)  # 지수 백오프 + 지터
+                    st.warning(f"요청 제한 발생. {wait_time:.1f}초 후 재시도... ({attempt + 1}/{max_retries})")
+                    sleep(wait_time)
+                    continue
+                else:
+                    raise TranscriptExtractionError(f"YTA: 최대 재시도 초과 - {str(e)}")
+            else:
+                # 다른 종류의 오류는 즉시 재발생
+                if isinstance(e, (NoTranscriptFound, TranscriptsDisabled, VideoUnavailable)):
+                    raise
+                else:
+                    raise TranscriptExtractionError(f"YTA 방식 실패: {str(e)}")
+    
+    raise TranscriptExtractionError("YTA: 예상치 못한 재시도 루프 종료")
 
 # ---------------------------------
 # 2) pytube captions 폴백 (SRT/XML)
@@ -257,15 +274,26 @@ def parse_vtt(vtt: str) -> List[str]:
     
     return lines
 
-def fetch_via_ytdlp(url_or_id: str, langs: List[str]) -> str:
-    """yt-dlp로 자막 가져오기."""
+def fetch_via_ytdlp_enhanced(url_or_id: str, langs: List[str]) -> str:
+    """향상된 yt-dlp 자막 가져오기"""
     url = to_clean_watch_url(url_or_id)
     
+    # 더 관대한 설정
     ydl_opts = {
         "quiet": True,
         "noplaylist": True,
         "writesubtitles": False,
         "writeautomaticsub": False,
+        "socket_timeout": 60,
+        "retries": 3,
+        # User-Agent 순환 사용
+        "http_headers": {
+            "User-Agent": random.choice([
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            ])
+        }
     }
     
     try:
@@ -276,87 +304,187 @@ def fetch_via_ytdlp(url_or_id: str, langs: List[str]) -> str:
 
     subs = info.get("subtitles") or {}
     autos = info.get("automatic_captions") or {}
+    
+    # 디버깅 정보
+    st.info(f"yt-dlp 발견: 수동자막={list(subs.keys())}, 자동자막={list(autos.keys())}")
 
-    # 후보 구성
+    # 후보 구성 (더 넓은 범위)
     candidates = []
+    
+    # 1순위: 요청한 언어의 수동 자막
     for lg in langs:
         if lg in subs:
-            candidates.append(("subs", lg, subs[lg]))
+            candidates.append(("manual", lg, subs[lg]))
+    
+    # 2순위: 요청한 언어의 자동 자막
     for lg in langs:
         if lg in autos:
             candidates.append(("auto", lg, autos[lg]))
     
-    # 영어 폴백
-    if not any(c[1] == "en" for c in candidates):
+    # 3순위: 영어 폴백
+    if "en" not in langs:
         if "en" in subs:
-            candidates.append(("subs", "en", subs["en"]))
+            candidates.append(("manual", "en", subs["en"]))
         if "en" in autos:
             candidates.append(("auto", "en", autos["en"]))
+    
+    # 4순위: 다른 언어라도 시도 (첫 번째 가능한 것)
+    if not candidates:
+        all_available = list(subs.keys()) + list(autos.keys())
+        if all_available:
+            first_lang = all_available[0]
+            if first_lang in subs:
+                candidates.append(("manual", first_lang, subs[first_lang]))
+            elif first_lang in autos:
+                candidates.append(("auto", first_lang, autos[first_lang]))
 
     for kind, lg, fmt_list in candidates:
         if not fmt_list:
             continue
-            
-        # VTT 형식 우선 선택
-        vtt_item = None
+        
+        st.info(f"시도중: {kind} {lg} - {len(fmt_list)}개 형식")
+        
+        # 형식 우선순위: vtt > srv3 > ttml > json3 > 기타
+        format_priority = ["vtt", "webvtt", "srv3", "ttml", "json3"]
+        sorted_formats = []
+        
+        # 우선순위 형식 먼저
+        for fmt_name in format_priority:
+            for item in fmt_list:
+                if item.get("ext", "").lower() == fmt_name:
+                    sorted_formats.append(item)
+        
+        # 나머지 형식 추가
         for item in fmt_list:
-            if item.get("ext", "").lower() in ("vtt", "webvtt"):
-                vtt_item = item
-                break
+            if item not in sorted_formats:
+                sorted_formats.append(item)
         
-        target = vtt_item or fmt_list[0]
-        
-        try:
-            with urlopen(target["url"]) as resp:
-                data = resp.read().decode("utf-8", errors="ignore")
-            
-            if target.get("ext", "").lower() in ("vtt", "webvtt"):
-                lines = parse_vtt(data)
-                if lines:
-                    st.success(f"자막 확보(yt-dlp-{kind}-vtt): {lg}")
-                    return "\n".join(lines)
-            else:
-                # 다른 형식: 태그 제거 후 텍스트만
-                text = re.sub(r"<.*?>", " ", data)
-                text = html.unescape(text)
-                text = re.sub(r"\s+", " ", text).strip()
-                if text and len(text) > 50:  # 최소 길이 체크
-                    st.success(f"자막 확보(yt-dlp-{kind}-{target.get('ext','raw')}): {lg}")
-                    return text
-        except Exception:
-            continue
+        for item in sorted_formats:
+            try:
+                st.info(f"다운로드 시도: {item.get('ext', 'unknown')} - {item['url'][:100]}...")
+                
+                with urlopen(item["url"]) as resp:
+                    data = resp.read().decode("utf-8", errors="ignore")
+                
+                ext = item.get("ext", "").lower()
+                
+                if ext in ("vtt", "webvtt"):
+                    lines = parse_vtt(data)
+                    if lines:
+                        st.success(f"자막 확보(yt-dlp-{kind}-vtt): {lg}")
+                        return "\n".join(lines)
+                
+                elif ext == "srv3":
+                    # SRV3 JSON 형식 처리
+                    lines = parse_srv3_json(data)
+                    if lines:
+                        st.success(f"자막 확보(yt-dlp-{kind}-srv3): {lg}")
+                        return "\n".join(lines)
+                
+                elif ext == "ttml":
+                    # TTML XML 형식 처리
+                    lines = parse_ttml(data)
+                    if lines:
+                        st.success(f"자막 확보(yt-dlp-{kind}-ttml): {lg}")
+                        return "\n".join(lines)
+                        
+                else:
+                    # 다른 형식: 단순 태그 제거
+                    text = re.sub(r"<.*?>", " ", data)
+                    text = html.unescape(text)
+                    text = re.sub(r"\s+", " ", text).strip()
+                    if text and len(text) > 100:  # 더 엄격한 최소 길이
+                        st.success(f"자막 확보(yt-dlp-{kind}-{ext}): {lg}")
+                        return text
+                        
+            except Exception as e:
+                st.warning(f"형식 {item.get('ext', 'unknown')} 실패: {str(e)[:100]}")
+                continue
 
-    raise TranscriptExtractionError("yt-dlp: 매칭되는 자막 소스 없음")
+    raise TranscriptExtractionError("yt-dlp: 모든 자막 형식 시도 실패")
+
+def parse_srv3_json(json_data: str) -> List[str]:
+    """YouTube SRV3 JSON 자막 파싱"""
+    try:
+        import json
+        data = json.loads(json_data)
+        lines = []
+        
+        events = data.get("events", [])
+        for event in events:
+            start_time = event.get("tStartMs", 0) / 1000.0
+            segs = event.get("segs", [])
+            text = "".join([seg.get("utf8", "") for seg in segs]).strip()
+            if text:
+                lines.append(f"[{start_time:.1f}] {text}")
+        
+        return lines
+    except Exception:
+        return []
+
+def parse_ttml(ttml_data: str) -> List[str]:
+    """TTML XML 자막 파싱"""
+    try:
+        lines = []
+        # <p> 태그에서 시간 정보와 텍스트 추출
+        pattern = r'<p[^>]*begin="([^"]*)"[^>]*>(.*?)</p>'
+        
+        for match in re.finditer(pattern, ttml_data, re.DOTALL):
+            time_str = match.group(1)
+            text_content = match.group(2)
+            
+            # 시간 변환 (00:00:12.340 -> 초)
+            try:
+                parts = time_str.replace(',', '.').split(':')
+                if len(parts) == 3:
+                    h, m, s = parts
+                    start_time = int(h) * 3600 + int(m) * 60 + float(s)
+                else:
+                    start_time = 0.0
+            except:
+                start_time = 0.0
+            
+            # 텍스트 정리
+            text = re.sub(r"<.*?>", " ", text_content)
+            text = html.unescape(text)
+            text = re.sub(r"\s+", " ", text).strip()
+            
+            if text:
+                lines.append(f"[{start_time:.1f}] {text}")
+        
+        return lines
+    except Exception:
+        return []
 
 # ---------------------------------
 # 최종 래퍼
 # ---------------------------------
 def fetch_transcript_resilient(url: str, video_id: str, langs: List[str]) -> str:
-    """3단계 폴백으로 자막 가져오기 (yt-dlp 우선순위 상향)"""
+    """3단계 폴백으로 자막 가져오기 (개선된 버전)"""
     errors = []
     
-    # 1) youtube_transcript_api (가장 안정적)
+    # 1) youtube_transcript_api (재시도 로직 포함)
     try:
-        return fetch_via_yta(video_id, langs)
+        return fetch_via_yta_with_retry(video_id, langs)
     except (NoTranscriptFound, TranscriptsDisabled, VideoUnavailable):
         errors.append("YTA: 자막을 찾을 수 없음")
-        time.sleep(0.5)
+        sleep(1)
     except TranscriptExtractionError as e:
         errors.append(f"YTA: {str(e)}")
-        time.sleep(0.5)
+        sleep(1)
     except Exception as e:
         errors.append(f"YTA: 예상치 못한 오류 - {str(e)}")
-        time.sleep(0.5)
+        sleep(1)
 
-    # 2) yt-dlp (pytube보다 안정적)
+    # 2) yt-dlp (향상된 버전)
     try:
-        return fetch_via_ytdlp(url, langs)
+        return fetch_via_ytdlp_enhanced(url, langs)
     except TranscriptExtractionError as e:
         errors.append(f"yt-dlp: {str(e)}")
-        time.sleep(0.5)
+        sleep(1)
     except Exception as e:
         errors.append(f"yt-dlp: 예상치 못한 오류 - {str(e)}")
-        time.sleep(0.5)
+        sleep(1)
 
     # 3) pytube (마지막 수단)
     try:
