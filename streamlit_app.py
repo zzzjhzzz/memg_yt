@@ -26,6 +26,132 @@ class TranscriptExtractionError(Exception):
 ssl._create_default_https_context = ssl._create_unverified_context
 
 # ---------------------------------
+# 자막 중복 제거 및 병합 함수들
+# ---------------------------------
+def clean_duplicate_subtitles(transcript_text: str) -> str:
+    """자막에서 중복된 문장들을 제거"""
+    lines = transcript_text.strip().split('\n')
+    cleaned_lines = []
+    seen_texts = set()
+    
+    for line in lines:
+        if not line.strip():
+            continue
+            
+        # 시간 태그와 텍스트 분리
+        match = re.match(r'\[(\d+\.?\d*)\]\s*(.*)', line)
+        if not match:
+            continue
+            
+        timestamp = float(match.group(1))
+        text = match.group(2).strip()
+        
+        if not text or text in ['[Music]', '[Applause]', '[Laughter]']:
+            continue
+            
+        # 중복 텍스트 체크 (대소문자 구분 안함)
+        text_lower = text.lower()
+        
+        # 완전 중복 제거
+        if text_lower in seen_texts:
+            continue
+            
+        # 부분 중복 제거 (한 문장이 다른 문장에 포함된 경우)
+        is_duplicate = False
+        texts_to_remove = []
+        
+        for seen_text in list(seen_texts):
+            # 현재 텍스트가 이전 텍스트에 포함되거나 그 반대
+            if text_lower in seen_text:
+                # 현재 텍스트가 더 짧으면 스킵
+                is_duplicate = True
+                break
+            elif seen_text in text_lower:
+                # 이전 텍스트가 더 짧으면 제거 대상으로 마킹
+                texts_to_remove.append(seen_text)
+                
+        if not is_duplicate:
+            # 제거할 텍스트들 처리
+            for old_text in texts_to_remove:
+                seen_texts.discard(old_text)
+                # 기존 라인도 제거
+                cleaned_lines = [l for l in cleaned_lines 
+                               if not re.match(r'\[\d+\.?\d*\]\s*' + re.escape(old_text), l, re.IGNORECASE)]
+            
+            seen_texts.add(text_lower)
+            cleaned_lines.append(f"[{timestamp:.1f}] {text}")
+    
+    return '\n'.join(cleaned_lines)
+
+def merge_consecutive_subtitles(transcript_text: str, time_threshold: float = 2.0) -> str:
+    """연속된 비슷한 자막들을 병합"""
+    lines = transcript_text.strip().split('\n')
+    merged_lines = []
+    
+    i = 0
+    while i < len(lines):
+        if not lines[i].strip():
+            i += 1
+            continue
+            
+        match = re.match(r'\[(\d+\.?\d*)\]\s*(.*)', lines[i])
+        if not match:
+            i += 1
+            continue
+            
+        current_time = float(match.group(1))
+        current_text = match.group(2).strip()
+        
+        # 다음 라인들과 비교해서 병합 가능한지 체크
+        merged_text = current_text
+        j = i + 1
+        
+        while j < len(lines):
+            if j >= len(lines):
+                break
+                
+            next_match = re.match(r'\[(\d+\.?\d*)\]\s*(.*)', lines[j])
+            if not next_match:
+                j += 1
+                continue
+                
+            next_time = float(next_match.group(1))
+            next_text = next_match.group(2).strip()
+            
+            # 시간이 너무 멀면 중단
+            if (next_time - current_time) > time_threshold:
+                break
+                
+            # 텍스트가 현재 텍스트의 연장인지 체크
+            if (current_text.lower() in next_text.lower() or 
+                next_text.lower() in current_text.lower() or 
+                next_text.lower().startswith(current_text.lower()[:20]) or
+                current_text.lower().startswith(next_text.lower()[:20])):
+                # 더 긴 텍스트로 업데이트
+                if len(next_text) > len(merged_text):
+                    merged_text = next_text
+                j += 1
+            else:
+                break
+                
+        merged_lines.append(f"[{current_time:.1f}] {merged_text}")
+        i = max(i + 1, j)
+    
+    return '\n'.join(merged_lines)
+
+def apply_subtitle_cleaning(raw_transcript: str, clean_duplicates: bool, merge_consecutive: bool) -> str:
+    """사용자 설정에 따라 자막 정리 적용"""
+    result = raw_transcript
+    
+    if clean_duplicates:
+        result = clean_duplicate_subtitles(result)
+    
+    if merge_consecutive:
+        result = merge_consecutive_subtitles(result)
+    
+    return result
+
+# ---------------------------------
 # URL 정리 / 비디오ID 추출
 # ---------------------------------
 YOUTUBE_URL_RE = re.compile(
@@ -106,7 +232,7 @@ def fetch_via_yta_with_retry(video_id: str, langs: List[str], max_retries: int =
             
             entries = tr.fetch()
             # 성공 시에만 메시지 표시
-            st.success(f"✅ 자막 추출 성공 (YTA): {tr.language}" + (" [자동생성]" if tr.is_generated else " [수동]"))
+            st.success(f"자막 추출 성공 (YTA): {tr.language}" + (" [자동생성]" if tr.is_generated else " [수동]"))
             return "\n".join([f"[{e['start']:.1f}] {e['text']}" for e in entries])
             
         except Exception as e:
@@ -225,7 +351,7 @@ def fetch_via_pytube(url_or_id: str, langs: List[str]) -> str:
                             continue
                 
                 if lines:
-                    st.success(f"✅ 자막 추출 성공 (pytube): {code}")
+                    st.success(f"자막 추출 성공 (pytube): {code}")
                     return "\n".join(lines)
                     
             except Exception:
@@ -234,7 +360,7 @@ def fetch_via_pytube(url_or_id: str, langs: List[str]) -> str:
                     xml = cap.xml_captions
                     items = clean_xml_text(xml)
                     if items:
-                        st.success(f"✅ 자막 추출 성공 (pytube): {code}")
+                        st.success(f"자막 추출 성공 (pytube): {code}")
                         return "\n".join([f"[{stt:.1f}] {txt}" for stt, txt in items])
                 except Exception:
                     continue
@@ -417,19 +543,19 @@ def fetch_via_ytdlp_enhanced(url_or_id: str, langs: List[str]) -> str:
                 if ext in ("vtt", "webvtt"):
                     lines = parse_vtt(data)
                     if lines:
-                        st.success(f"✅ 자막 추출 성공 (yt-dlp): {lg} ({kind}, {ext.upper()})")
+                        st.success(f"자막 추출 성공 (yt-dlp): {lg} ({kind}, {ext.upper()})")
                         return "\n".join(lines)
                 
                 elif ext == "srv3":
                     lines = parse_srv3_json(data)
                     if lines:
-                        st.success(f"✅ 자막 추출 성공 (yt-dlp): {lg} ({kind}, SRV3)")
+                        st.success(f"자막 추출 성공 (yt-dlp): {lg} ({kind}, SRV3)")
                         return "\n".join(lines)
                 
                 elif ext == "ttml":
                     lines = parse_ttml(data)
                     if lines:
-                        st.success(f"✅ 자막 추출 성공 (yt-dlp): {lg} ({kind}, TTML)")
+                        st.success(f"자막 추출 성공 (yt-dlp): {lg} ({kind}, TTML)")
                         return "\n".join(lines)
                         
                 else:
@@ -438,7 +564,7 @@ def fetch_via_ytdlp_enhanced(url_or_id: str, langs: List[str]) -> str:
                     text = html.unescape(text)
                     text = re.sub(r"\s+", " ", text).strip()
                     if text and len(text) > 100:
-                        st.success(f"✅ 자막 추출 성공 (yt-dlp): {lg} ({kind}, {ext.upper()})")
+                        st.success(f"자막 추출 성공 (yt-dlp): {lg} ({kind}, {ext.upper()})")
                         return text
                         
             except Exception:
@@ -487,7 +613,7 @@ def fetch_transcript_resilient(url: str, video_id: str, langs: List[str]) -> str
         errors.append(f"pytube: {str(e)}")
 
     # 모든 방법 실패 시 - 오류 정보를 expander에 넣어서 접을 수 있게 함
-    with st.expander("🔍 상세 오류 정보", expanded=False):
+    with st.expander("상세 오류 정보", expanded=False):
         for i, error in enumerate(errors, 1):
             st.text(f"{i}. {error}")
     
@@ -503,18 +629,43 @@ def fetch_transcript_resilient(url: str, video_id: str, langs: List[str]) -> str
 # Streamlit UI
 # ---------------------------------
 st.set_page_config(page_title="YouTube 자막 추출기", layout="wide")
-st.title("🎬 YouTube 자막 추출기")
+st.title("YouTube 자막 추출기")
 st.caption("YouTube 영상의 자막을 추출합니다. API 키 불필요.")
 
 with st.sidebar:
     st.header("설정")
+    
+    # 언어 설정
     lang_pref = st.multiselect(
         "언어 우선순위 (위에서부터 시도)",
         ["ko", "en", "ja", "zh-Hans", "zh-Hant", "es", "fr", "de"],
         default=["ko", "en"],
         help="선호하는 언어를 순서대로 선택하세요"
     )
+    
+    # 기본 옵션들
     show_meta = st.toggle("영상 제목/길이 표시", value=True)
+    
+    # 자막 정리 옵션들
+    st.subheader("자막 정리 옵션")
+    clean_duplicates = st.toggle(
+        "중복 자막 제거", 
+        value=True,
+        help="같은 내용이 반복되는 자막을 제거합니다"
+    )
+    merge_consecutive = st.toggle(
+        "연속 자막 병합", 
+        value=True,
+        help="비슷한 시간대의 유사한 자막을 병합합니다"
+    )
+    
+    # 출력 옵션
+    st.subheader("출력 옵션")
+    show_original = st.toggle(
+        "원본 자막도 함께 표시", 
+        value=False,
+        help="정리된 자막과 원본 자막을 모두 표시합니다"
+    )
 
 url = st.text_input(
     "YouTube 링크", 
@@ -540,63 +691,3 @@ if run:
     st.info(f"비디오 ID: {vid}")
 
     # 메타 정보 표시
-    if show_meta:
-        with st.spinner("영상 정보 가져오는 중..."):
-            try:
-                info = safe_get_youtube_info(clean_url)
-                if info:
-                    title = info.title
-                    length_min = int((info.length or 0) / 60) if info.length else 0
-                    st.info(f"**제목**: {title}  |  **길이**: 약 {length_min}분")
-                else:
-                    st.caption("영상 정보 조회 실패 - 자막 추출을 계속 진행합니다.")
-            except Exception as e:
-                st.caption(f"영상 정보 조회 실패 ({str(e)[:50]}) - 자막 추출을 계속 진행합니다.")
-
-    # 자막 추출
-    with st.spinner("자막 추출 중..."):
-        try:
-            transcript_text = fetch_transcript_resilient(clean_url, vid, lang_pref)
-        except TranscriptExtractionError as e:
-            st.error(f"❌ {str(e)}")
-            st.stop()
-        except (NoTranscriptFound, TranscriptsDisabled) as e:
-            st.error(f"❌ 자막을 찾을 수 없습니다: {str(e)}")
-            st.stop()
-        except VideoUnavailable:
-            st.error("❌ 영상에 접근할 수 없습니다 (비공개, 지역제한, 연령제한 등)")
-            st.stop()
-        except Exception as e:
-            st.error(f"❌ 예상치 못한 오류: {str(e)}")
-            st.stop()
-
-    # 결과 출력
-    st.success("자막 추출 완료!")
-    
-    col1, col2 = st.columns([1, 4])
-    with col1:
-        st.download_button(
-            "📄 자막 다운로드 (TXT)",
-            data=transcript_text.encode("utf-8"),
-            file_name=f"transcript_{vid}.txt",
-            mime="text/plain",
-        )
-    
-    with col2:
-        word_count = len(transcript_text.split())
-        st.caption(f"총 {word_count:,}개 단어")
-
-    st.subheader("📄 추출된 자막")
-    st.text_area(
-        "", 
-        value=transcript_text, 
-        height=500,
-        help="자막 내용을 확인하고 복사할 수 있습니다"
-    )
-
-# 하단 정보
-st.markdown("---")
-st.caption(
-    "💡 **사용 팁**: 이 도구는 개인 학습/연구 목적으로 사용하세요. "
-    "일부 영상은 저작권, 연령제한, 지역제한 등으로 처리되지 않을 수 있습니다."
-)
