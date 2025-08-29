@@ -90,7 +90,9 @@ def safe_get_youtube_info(url: str):
 # 1) youtube_transcript_api (공식/자동생성)
 # ---------------------------------
 def fetch_via_yta_with_retry(video_id: str, langs: List[str], max_retries: int = 3) -> str:
-    """재시도 로직이 포함된 YTA 자막 추출"""
+    """재시도 로직이 포함된 YTA 자막 추출 (조용한 버전)"""
+    last_error = None
+    
     for attempt in range(max_retries):
         try:
             tl = YouTubeTranscriptApi.list_transcripts(video_id)
@@ -103,28 +105,29 @@ def fetch_via_yta_with_retry(video_id: str, langs: List[str], max_retries: int =
                 tr = tl.find_generated_transcript(langs)
             
             entries = tr.fetch()
-            st.success(f"자막 확보(yta): lang={tr.language}, auto={tr.is_generated}")
+            # 성공 시에만 메시지 표시
+            st.success(f"✅ 자막 추출 성공 (YTA): {tr.language}" + (" [자동생성]" if tr.is_generated else " [수동]"))
             return "\n".join([f"[{e['start']:.1f}] {e['text']}" for e in entries])
             
         except Exception as e:
+            last_error = e
             error_msg = str(e).lower()
             
             if "too many requests" in error_msg or "429" in error_msg:
                 if attempt < max_retries - 1:
-                    wait_time = (2 ** attempt) + random.uniform(1, 3)  # 지수 백오프 + 지터
-                    st.warning(f"요청 제한 발생. {wait_time:.1f}초 후 재시도... ({attempt + 1}/{max_retries})")
+                    wait_time = (2 ** attempt) + random.uniform(1, 3)
                     sleep(wait_time)
                     continue
                 else:
-                    raise TranscriptExtractionError(f"YTA: 최대 재시도 초과 - {str(e)}")
+                    raise TranscriptExtractionError(f"YouTube API 요청 제한 초과 (429)")
             else:
                 # 다른 종류의 오류는 즉시 재발생
                 if isinstance(e, (NoTranscriptFound, TranscriptsDisabled, VideoUnavailable)):
                     raise
                 else:
-                    raise TranscriptExtractionError(f"YTA 방식 실패: {str(e)}")
+                    raise TranscriptExtractionError(f"YTA 처리 실패: {str(e)}")
     
-    raise TranscriptExtractionError("YTA: 예상치 못한 재시도 루프 종료")
+    raise TranscriptExtractionError(f"YTA 재시도 실패: {str(last_error)}")
 
 # ---------------------------------
 # 2) pytube captions 폴백 (SRT/XML)
@@ -148,7 +151,7 @@ def clean_xml_text(xml_text: str) -> List[tuple]:
     return items
 
 def fetch_via_pytube(url_or_id: str, langs: List[str]) -> str:
-    """pytube 자막 트랙에서 추출 (더 안전한 방식)."""
+    """pytube 자막 트랙에서 추출 (조용한 버전)."""
     url = to_clean_watch_url(url_or_id)
     
     try:
@@ -183,9 +186,6 @@ def fetch_via_pytube(url_or_id: str, langs: List[str]) -> str:
             candidates.extend(["en", "a.en"])
 
         available_codes = {c.code: c for c in tracks}
-        
-        # 사용 가능한 자막 코드 로깅
-        st.info(f"사용 가능한 자막: {list(available_codes.keys())}")
 
         for code in candidates:
             cap = available_codes.get(code)
@@ -225,25 +225,24 @@ def fetch_via_pytube(url_or_id: str, langs: List[str]) -> str:
                             continue
                 
                 if lines:
-                    st.success(f"자막 확보(pytube-srt): {code}")
+                    st.success(f"✅ 자막 추출 성공 (pytube): {code}")
                     return "\n".join(lines)
                     
-            except Exception as srt_error:
+            except Exception:
                 # XML 형식으로 폴백
                 try:
                     xml = cap.xml_captions
                     items = clean_xml_text(xml)
                     if items:
-                        st.success(f"자막 확보(pytube-xml): {code}")
+                        st.success(f"✅ 자막 추출 성공 (pytube): {code}")
                         return "\n".join([f"[{stt:.1f}] {txt}" for stt, txt in items])
-                except Exception as xml_error:
-                    st.warning(f"pytube {code} 실패: SRT={str(srt_error)[:50]}, XML={str(xml_error)[:50]}")
+                except Exception:
                     continue
 
     except Exception as e:
-        raise TranscriptExtractionError(f"pytube 방식 실패: {str(e)}")
+        raise TranscriptExtractionError(f"pytube 처리 실패: {str(e)}")
     
-    raise TranscriptExtractionError("pytube: 매칭되는 자막 트랙 없음")
+    raise TranscriptExtractionError(f"pytube: 매칭되는 자막 없음 (사용가능: {list(available_codes.keys())})")
 
 # ---------------------------------
 # 3) yt-dlp 폴백
@@ -275,12 +274,13 @@ def parse_vtt(vtt: str) -> List[str]:
     return lines
 
 def fetch_via_ytdlp_enhanced(url_or_id: str, langs: List[str]) -> str:
-    """향상된 yt-dlp 자막 가져오기"""
+    """향상된 yt-dlp 자막 가져오기 (조용한 버전)"""
     url = to_clean_watch_url(url_or_id)
     
     # 더 관대한 설정
     ydl_opts = {
         "quiet": True,
+        "no_warnings": True,
         "noplaylist": True,
         "writesubtitles": False,
         "writeautomaticsub": False,
@@ -305,9 +305,6 @@ def fetch_via_ytdlp_enhanced(url_or_id: str, langs: List[str]) -> str:
     subs = info.get("subtitles") or {}
     autos = info.get("automatic_captions") or {}
     
-    # 디버깅 정보
-    st.info(f"yt-dlp 발견: 수동자막={list(subs.keys())}, 자동자막={list(autos.keys())}")
-
     # 후보 구성 (더 넓은 범위)
     candidates = []
     
@@ -338,17 +335,15 @@ def fetch_via_ytdlp_enhanced(url_or_id: str, langs: List[str]) -> str:
             elif first_lang in autos:
                 candidates.append(("auto", first_lang, autos[first_lang]))
 
+    # 형식 우선순위 정의
+    format_priority = ["vtt", "webvtt", "srv3", "ttml", "json3"]
+    
     for kind, lg, fmt_list in candidates:
         if not fmt_list:
             continue
         
-        st.info(f"시도중: {kind} {lg} - {len(fmt_list)}개 형식")
-        
-        # 형식 우선순위: vtt > srv3 > ttml > json3 > 기타
-        format_priority = ["vtt", "webvtt", "srv3", "ttml", "json3"]
+        # 형식을 우선순위대로 정렬
         sorted_formats = []
-        
-        # 우선순위 형식 먼저
         for fmt_name in format_priority:
             for item in fmt_list:
                 if item.get("ext", "").lower() == fmt_name:
@@ -361,8 +356,6 @@ def fetch_via_ytdlp_enhanced(url_or_id: str, langs: List[str]) -> str:
         
         for item in sorted_formats:
             try:
-                st.info(f"다운로드 시도: {item.get('ext', 'unknown')} - {item['url'][:100]}...")
-                
                 with urlopen(item["url"]) as resp:
                     data = resp.read().decode("utf-8", errors="ignore")
                 
@@ -371,21 +364,19 @@ def fetch_via_ytdlp_enhanced(url_or_id: str, langs: List[str]) -> str:
                 if ext in ("vtt", "webvtt"):
                     lines = parse_vtt(data)
                     if lines:
-                        st.success(f"자막 확보(yt-dlp-{kind}-vtt): {lg}")
+                        st.success(f"✅ 자막 추출 성공 (yt-dlp): {lg} ({kind}, {ext.upper()})")
                         return "\n".join(lines)
                 
                 elif ext == "srv3":
-                    # SRV3 JSON 형식 처리
                     lines = parse_srv3_json(data)
                     if lines:
-                        st.success(f"자막 확보(yt-dlp-{kind}-srv3): {lg}")
+                        st.success(f"✅ 자막 추출 성공 (yt-dlp): {lg} ({kind}, SRV3)")
                         return "\n".join(lines)
                 
                 elif ext == "ttml":
-                    # TTML XML 형식 처리
                     lines = parse_ttml(data)
                     if lines:
-                        st.success(f"자막 확보(yt-dlp-{kind}-ttml): {lg}")
+                        st.success(f"✅ 자막 추출 성공 (yt-dlp): {lg} ({kind}, TTML)")
                         return "\n".join(lines)
                         
                 else:
@@ -393,15 +384,16 @@ def fetch_via_ytdlp_enhanced(url_or_id: str, langs: List[str]) -> str:
                     text = re.sub(r"<.*?>", " ", data)
                     text = html.unescape(text)
                     text = re.sub(r"\s+", " ", text).strip()
-                    if text and len(text) > 100:  # 더 엄격한 최소 길이
-                        st.success(f"자막 확보(yt-dlp-{kind}-{ext}): {lg}")
+                    if text and len(text) > 100:
+                        st.success(f"✅ 자막 추출 성공 (yt-dlp): {lg} ({kind}, {ext.upper()})")
                         return text
                         
-            except Exception as e:
-                st.warning(f"형식 {item.get('ext', 'unknown')} 실패: {str(e)[:100]}")
-                continue
+            except Exception:
+                continue  # 조용히 다음 형식 시도
 
-    raise TranscriptExtractionError("yt-dlp: 모든 자막 형식 시도 실패")
+    # 디버깅 정보 (실패했을 때만)
+    available_langs = list(set(list(subs.keys()) + list(autos.keys())))
+    raise TranscriptExtractionError(f"yt-dlp: 자막 추출 실패 (사용가능: {available_langs})")
 
 def parse_srv3_json(json_data: str) -> List[str]:
     """YouTube SRV3 JSON 자막 파싱"""
@@ -460,26 +452,52 @@ def parse_ttml(ttml_data: str) -> List[str]:
 # 최종 래퍼
 # ---------------------------------
 def fetch_transcript_resilient(url: str, video_id: str, langs: List[str]) -> str:
-    """3단계 폴백으로 자막 가져오기 (개선된 버전)"""
+    """3단계 폴백으로 자막 가져오기 (깔끔한 버전)"""
     errors = []
     
     # 1) youtube_transcript_api (재시도 로직 포함)
     try:
         return fetch_via_yta_with_retry(video_id, langs)
-    except (NoTranscriptFound, TranscriptsDisabled, VideoUnavailable):
-        errors.append("YTA: 자막을 찾을 수 없음")
+    except (NoTranscriptFound, TranscriptsDisabled, VideoUnavailable) as e:
+        errors.append(f"YTA: {str(e)}")
         sleep(1)
     except TranscriptExtractionError as e:
         errors.append(f"YTA: {str(e)}")
         sleep(1)
     except Exception as e:
-        errors.append(f"YTA: 예상치 못한 오류 - {str(e)}")
+        errors.append(f"YTA: {str(e)}")
         sleep(1)
 
     # 2) yt-dlp (향상된 버전)
     try:
         return fetch_via_ytdlp_enhanced(url, langs)
     except TranscriptExtractionError as e:
+        errors.append(f"yt-dlp: {str(e)}")
+        sleep(1)
+    except Exception as e:
+        errors.append(f"yt-dlp: {str(e)}")
+        sleep(1)
+
+    # 3) pytube (마지막 수단)
+    try:
+        return fetch_via_pytube(url, langs)
+    except TranscriptExtractionError as e:
+        errors.append(f"pytube: {str(e)}")
+    except Exception as e:
+        errors.append(f"pytube: {str(e)}")
+
+    # 모든 방법 실패 시 - 오류 정보를 expander에 넣어서 접을 수 있게 함
+    with st.expander("🔍 상세 오류 정보", expanded=False):
+        for i, error in enumerate(errors, 1):
+            st.text(f"{i}. {error}")
+    
+    # 간단한 오류 메시지
+    if any("429" in err or "Too Many Requests" in err for err in errors):
+        raise TranscriptExtractionError("YouTube API 요청 제한 (429) - 잠시 후 다시 시도하거나 다른 영상을 사용해주세요")
+    elif any("자막" in err and ("없음" in err or "찾을 수 없음" in err) for err in errors):
+        raise TranscriptExtractionError("이 영상에는 자막이 없습니다")
+    else:
+        raise TranscriptExtractionError("자막 추출 실패 - 위의 상세 정보를 확인하세요") e:
         errors.append(f"yt-dlp: {str(e)}")
         sleep(1)
     except Exception as e:
