@@ -62,13 +62,25 @@ def to_clean_watch_url(url_or_id: str) -> str:
     return f"https://www.youtube.com/watch?v={vid}" if vid else url_or_id
 
 def safe_get_youtube_info(url: str):
-    """안전한 YouTube 정보 가져오기"""
+    """yt-dlp로 안전한 YouTube 정보 가져오기"""
     try:
-        # pytube 설정 개선
-        yt = YouTube(url, use_oauth=False, allow_oauth_cache=False)
-        # 연결 테스트
-        _ = yt.title
-        return yt
+        ydl_opts = {
+            "quiet": True,
+            "noplaylist": True,
+            "extract_flat": False,
+        }
+        
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            
+        # 간단한 정보 객체 생성
+        class YouTubeInfo:
+            def __init__(self, info_dict):
+                self.title = info_dict.get('title', '제목 확인 불가')
+                self.length = info_dict.get('duration', 0)
+                
+        return YouTubeInfo(info)
+        
     except Exception as e:
         st.warning(f"YouTube 정보 가져오기 실패: {str(e)}")
         return None
@@ -119,13 +131,25 @@ def clean_xml_text(xml_text: str) -> List[tuple]:
     return items
 
 def fetch_via_pytube(url_or_id: str, langs: List[str]) -> str:
-    """pytube 자막 트랙에서 추출."""
+    """pytube 자막 트랙에서 추출 (더 안전한 방식)."""
     url = to_clean_watch_url(url_or_id)
     
     try:
-        yt = safe_get_youtube_info(url)
-        if not yt:
-            raise TranscriptExtractionError("pytube: YouTube 객체 생성 실패")
+        # 더 관대한 설정으로 재시도
+        yt = YouTube(url, use_oauth=False, allow_oauth_cache=False)
+        
+        # 정보 로딩을 명시적으로 시도
+        try:
+            _ = yt.title  # 기본 정보 로딩 테스트
+        except Exception:
+            # User-Agent 변경해서 재시도
+            import urllib.request
+            opener = urllib.request.build_opener()
+            opener.addheaders = [('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')]
+            urllib.request.install_opener(opener)
+            
+            yt = YouTube(url, use_oauth=False, allow_oauth_cache=False)
+            _ = yt.title
         
         tracks = yt.captions
         if not tracks:
@@ -142,6 +166,9 @@ def fetch_via_pytube(url_or_id: str, langs: List[str]) -> str:
             candidates.extend(["en", "a.en"])
 
         available_codes = {c.code: c for c in tracks}
+        
+        # 사용 가능한 자막 코드 로깅
+        st.info(f"사용 가능한 자막: {list(available_codes.keys())}")
 
         for code in candidates:
             cap = available_codes.get(code)
@@ -151,6 +178,7 @@ def fetch_via_pytube(url_or_id: str, langs: List[str]) -> str:
                 for k, v in available_codes.items():
                     if k.lower().startswith(code.lower().replace("a.", "")):
                         cap = v
+                        code = k  # 실제 발견된 코드로 업데이트
                         break
             
             if not cap:
@@ -176,14 +204,14 @@ def fetch_via_pytube(url_or_id: str, langs: List[str]) -> str:
                             text = " ".join(parts[2:]).strip()
                             if text:
                                 lines.append(f"[{start:.1f}] {text}")
-                        except ValueError:
+                        except (ValueError, IndexError):
                             continue
                 
                 if lines:
                     st.success(f"자막 확보(pytube-srt): {code}")
                     return "\n".join(lines)
                     
-            except Exception:
+            except Exception as srt_error:
                 # XML 형식으로 폴백
                 try:
                     xml = cap.xml_captions
@@ -191,7 +219,8 @@ def fetch_via_pytube(url_or_id: str, langs: List[str]) -> str:
                     if items:
                         st.success(f"자막 확보(pytube-xml): {code}")
                         return "\n".join([f"[{stt:.1f}] {txt}" for stt, txt in items])
-                except Exception:
+                except Exception as xml_error:
+                    st.warning(f"pytube {code} 실패: SRT={str(srt_error)[:50]}, XML={str(xml_error)[:50]}")
                     continue
 
     except Exception as e:
@@ -303,14 +332,13 @@ def fetch_via_ytdlp(url_or_id: str, langs: List[str]) -> str:
 # 최종 래퍼
 # ---------------------------------
 def fetch_transcript_resilient(url: str, video_id: str, langs: List[str]) -> str:
-    """3단계 폴백으로 자막 가져오기"""
+    """3단계 폴백으로 자막 가져오기 (yt-dlp 우선순위 상향)"""
     errors = []
     
-    # 1) youtube_transcript_api
+    # 1) youtube_transcript_api (가장 안정적)
     try:
         return fetch_via_yta(video_id, langs)
     except (NoTranscriptFound, TranscriptsDisabled, VideoUnavailable):
-        # 원본 예외는 그대로 재발생 (마지막에)
         errors.append("YTA: 자막을 찾을 수 없음")
         time.sleep(0.5)
     except TranscriptExtractionError as e:
@@ -320,23 +348,23 @@ def fetch_transcript_resilient(url: str, video_id: str, langs: List[str]) -> str
         errors.append(f"YTA: 예상치 못한 오류 - {str(e)}")
         time.sleep(0.5)
 
-    # 2) pytube
-    try:
-        return fetch_via_pytube(url, langs)
-    except TranscriptExtractionError as e:
-        errors.append(f"pytube: {str(e)}")
-        time.sleep(0.5)
-    except Exception as e:
-        errors.append(f"pytube: 예상치 못한 오류 - {str(e)}")
-        time.sleep(0.5)
-
-    # 3) yt-dlp
+    # 2) yt-dlp (pytube보다 안정적)
     try:
         return fetch_via_ytdlp(url, langs)
     except TranscriptExtractionError as e:
         errors.append(f"yt-dlp: {str(e)}")
+        time.sleep(0.5)
     except Exception as e:
         errors.append(f"yt-dlp: 예상치 못한 오류 - {str(e)}")
+        time.sleep(0.5)
+
+    # 3) pytube (마지막 수단)
+    try:
+        return fetch_via_pytube(url, langs)
+    except TranscriptExtractionError as e:
+        errors.append(f"pytube: {str(e)}")
+    except Exception as e:
+        errors.append(f"pytube: 예상치 못한 오류 - {str(e)}")
 
     # 모든 방법 실패 시 상세한 오류 정보 제공
     error_msg = " | ".join(errors)
@@ -386,15 +414,15 @@ if run:
     if show_meta:
         with st.spinner("영상 정보 가져오는 중..."):
             try:
-                yt = safe_get_youtube_info(clean_url)
-                if yt:
-                    title = yt.title or "제목 확인 불가"
-                    length_min = int((yt.length or 0) / 60)
+                info = safe_get_youtube_info(clean_url)
+                if info:
+                    title = info.title
+                    length_min = int((info.length or 0) / 60) if info.length else 0
                     st.info(f"**제목**: {title}  |  **길이**: 약 {length_min}분")
                 else:
                     st.caption("영상 정보 조회 실패 - 자막 추출을 계속 진행합니다.")
-            except Exception:
-                st.caption("영상 정보 조회 실패 - 자막 추출을 계속 진행합니다.")
+            except Exception as e:
+                st.caption(f"영상 정보 조회 실패 ({str(e)[:50]}) - 자막 추출을 계속 진행합니다.")
 
     # 자막 추출
     with st.spinner("자막 추출 중... (여러 방법을 순차적으로 시도합니다)"):
