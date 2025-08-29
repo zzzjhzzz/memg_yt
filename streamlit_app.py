@@ -14,13 +14,13 @@ from youtube_transcript_api import (
     TranscriptsDisabled,
     VideoUnavailable,
 )
+from pytube import YouTube
+import yt_dlp
 
 # 커스텀 예외 클래스 정의
 class TranscriptExtractionError(Exception):
     """자막 추출 실패 시 사용하는 커스텀 예외"""
     pass
-from pytube import YouTube
-import yt_dlp
 
 # SSL 인증서 문제 해결
 ssl._create_default_https_context = ssl._create_unverified_context
@@ -242,7 +242,7 @@ def fetch_via_pytube(url_or_id: str, langs: List[str]) -> str:
     except Exception as e:
         raise TranscriptExtractionError(f"pytube 처리 실패: {str(e)}")
     
-    raise TranscriptExtractionError(f"pytube: 매칭되는 자막 없음 (사용가능: {list(available_codes.keys())})")
+    raise TranscriptExtractionError(f"pytube: 매칭되는 자막 없음 (사용가능: {list(available_codes.keys()) if 'available_codes' in locals() else 'N/A'})")
 
 # ---------------------------------
 # 3) yt-dlp 폴백
@@ -272,6 +272,59 @@ def parse_vtt(vtt: str) -> List[str]:
             lines.append(f"[{start:.1f}] {text}")
     
     return lines
+
+def parse_srv3_json(json_data: str) -> List[str]:
+    """YouTube SRV3 JSON 자막 파싱"""
+    try:
+        import json
+        data = json.loads(json_data)
+        lines = []
+        
+        events = data.get("events", [])
+        for event in events:
+            start_time = event.get("tStartMs", 0) / 1000.0
+            segs = event.get("segs", [])
+            text = "".join([seg.get("utf8", "") for seg in segs]).strip()
+            if text:
+                lines.append(f"[{start_time:.1f}] {text}")
+        
+        return lines
+    except Exception:
+        return []
+
+def parse_ttml(ttml_data: str) -> List[str]:
+    """TTML XML 자막 파싱"""
+    try:
+        lines = []
+        # <p> 태그에서 시간 정보와 텍스트 추출
+        pattern = r'<p[^>]*begin="([^"]*)"[^>]*>(.*?)</p>'
+        
+        for match in re.finditer(pattern, ttml_data, re.DOTALL):
+            time_str = match.group(1)
+            text_content = match.group(2)
+            
+            # 시간 변환 (00:00:12.340 -> 초)
+            try:
+                parts = time_str.replace(',', '.').split(':')
+                if len(parts) == 3:
+                    h, m, s = parts
+                    start_time = int(h) * 3600 + int(m) * 60 + float(s)
+                else:
+                    start_time = 0.0
+            except:
+                start_time = 0.0
+            
+            # 텍스트 정리
+            text = re.sub(r"<.*?>", " ", text_content)
+            text = html.unescape(text)
+            text = re.sub(r"\s+", " ", text).strip()
+            
+            if text:
+                lines.append(f"[{start_time:.1f}] {text}")
+        
+        return lines
+    except Exception:
+        return []
 
 def fetch_via_ytdlp_enhanced(url_or_id: str, langs: List[str]) -> str:
     """향상된 yt-dlp 자막 가져오기 (조용한 버전)"""
@@ -395,59 +448,6 @@ def fetch_via_ytdlp_enhanced(url_or_id: str, langs: List[str]) -> str:
     available_langs = list(set(list(subs.keys()) + list(autos.keys())))
     raise TranscriptExtractionError(f"yt-dlp: 자막 추출 실패 (사용가능: {available_langs})")
 
-def parse_srv3_json(json_data: str) -> List[str]:
-    """YouTube SRV3 JSON 자막 파싱"""
-    try:
-        import json
-        data = json.loads(json_data)
-        lines = []
-        
-        events = data.get("events", [])
-        for event in events:
-            start_time = event.get("tStartMs", 0) / 1000.0
-            segs = event.get("segs", [])
-            text = "".join([seg.get("utf8", "") for seg in segs]).strip()
-            if text:
-                lines.append(f"[{start_time:.1f}] {text}")
-        
-        return lines
-    except Exception:
-        return []
-
-def parse_ttml(ttml_data: str) -> List[str]:
-    """TTML XML 자막 파싱"""
-    try:
-        lines = []
-        # <p> 태그에서 시간 정보와 텍스트 추출
-        pattern = r'<p[^>]*begin="([^"]*)"[^>]*>(.*?)</p>'
-        
-        for match in re.finditer(pattern, ttml_data, re.DOTALL):
-            time_str = match.group(1)
-            text_content = match.group(2)
-            
-            # 시간 변환 (00:00:12.340 -> 초)
-            try:
-                parts = time_str.replace(',', '.').split(':')
-                if len(parts) == 3:
-                    h, m, s = parts
-                    start_time = int(h) * 3600 + int(m) * 60 + float(s)
-                else:
-                    start_time = 0.0
-            except:
-                start_time = 0.0
-            
-            # 텍스트 정리
-            text = re.sub(r"<.*?>", " ", text_content)
-            text = html.unescape(text)
-            text = re.sub(r"\s+", " ", text).strip()
-            
-            if text:
-                lines.append(f"[{start_time:.1f}] {text}")
-        
-        return lines
-    except Exception:
-        return []
-
 # ---------------------------------
 # 최종 래퍼
 # ---------------------------------
@@ -497,24 +497,7 @@ def fetch_transcript_resilient(url: str, video_id: str, langs: List[str]) -> str
     elif any("자막" in err and ("없음" in err or "찾을 수 없음" in err) for err in errors):
         raise TranscriptExtractionError("이 영상에는 자막이 없습니다")
     else:
-        raise TranscriptExtractionError("자막 추출 실패 - 위의 상세 정보를 확인하세요") e:
-        errors.append(f"yt-dlp: {str(e)}")
-        sleep(1)
-    except Exception as e:
-        errors.append(f"yt-dlp: 예상치 못한 오류 - {str(e)}")
-        sleep(1)
-
-    # 3) pytube (마지막 수단)
-    try:
-        return fetch_via_pytube(url, langs)
-    except TranscriptExtractionError as e:
-        errors.append(f"pytube: {str(e)}")
-    except Exception as e:
-        errors.append(f"pytube: 예상치 못한 오류 - {str(e)}")
-
-    # 모든 방법 실패 시 상세한 오류 정보 제공
-    error_msg = " | ".join(errors)
-    raise TranscriptExtractionError(f"모든 방법 실패: {error_msg}")
+        raise TranscriptExtractionError("자막 추출 실패 - 위의 상세 정보를 확인하세요")
 
 # ---------------------------------
 # Streamlit UI
