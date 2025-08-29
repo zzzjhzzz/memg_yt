@@ -1,5 +1,6 @@
 import re
 import time
+import html
 from typing import Optional, List
 from urllib.parse import urlparse, parse_qs
 
@@ -25,7 +26,6 @@ def extract_video_id(url: str) -> Optional[str]:
     m = YOUTUBE_URL_RE.search(url)
     if m:
         return m.group(1)
-    # fallback: v= 파라미터
     try:
         q = urlparse(url)
         vid = parse_qs(q.query).get("v", [None])[0]
@@ -36,40 +36,140 @@ def extract_video_id(url: str) -> Optional[str]:
     return None
 
 # -----------------------------
-# 자막 페치(내구성↑) 함수
+# 1차: youtube_transcript_api
 # -----------------------------
-def fetch_transcript_resilient(video_id: str, langs: List[str]) -> str:
-    """
-    1) list_transcripts → 공식/자동생성 우선 시도
-    2) 실패 시 get_transcript(langs)
-    3) 그래도 실패하면 언어 미지정(get_transcript) 최종 폴백
-    성공 시 "[start] text" 줄바꿈 형태의 문자열 반환
-    """
-    # 1) 최신 방식: list_transcripts
+def fetch_via_yta(video_id: str, langs: List[str]) -> str:
+    # list_transcripts -> 공식/자동생성 우선
+    tl = YouTubeTranscriptApi.list_transcripts(video_id)
     try:
-        tl = YouTubeTranscriptApi.list_transcripts(video_id)
-        try:
-            tr = tl.find_transcript(langs)  # 업로더 자막 우선
-        except Exception:
-            tr = tl.find_generated_transcript(langs)  # 자동생성 자막
-        entries = tr.fetch()
-        st.success(f"자막 확보: lang={tr.language}, auto={tr.is_generated}")
-        return "\n".join([f"[{e['start']:.1f}] {e['text']}" for e in entries])
+        tr = tl.find_transcript(langs)  # 업로더 자막
     except Exception:
-        pass  # 다음 단계로 폴백
-
-    # 2) 구버전/직접 호출: 언어 우선
-    try:
-        entries = YouTubeTranscriptApi.get_transcript(video_id, languages=langs)
-        st.success("자막 확보 (get_transcript 경로)")
-        return "\n".join([f"[{e['start']:.1f}] {e['text']}" for e in entries])
-    except Exception:
-        pass
-
-    # 3) 언어 미지정 최종 폴백
-    entries = YouTubeTranscriptApi.get_transcript(video_id)
-    st.success("자막 확보 (언어 미지정 폴백)")
+        tr = tl.find_generated_transcript(langs)  # 자동생성 자막
+    entries = tr.fetch()
+    st.success(f"자막 확보(yta): lang={tr.language}, auto={tr.is_generated}")
     return "\n".join([f"[{e['start']:.1f}] {e['text']}" for e in entries])
+
+# -----------------------------
+# 2차: pytube 자막 트랙 폴백
+# -----------------------------
+def clean_xml_text(xml_text: str) -> List[tuple]:
+    """
+    <text start="12.34" dur="3.21">문장</text> 형식의 xml을
+    [(start, text), ...] 리스트로 변환
+    """
+    items = []
+    # 줄바꿈/엔티티 정리
+    xml_text = xml_text.replace("\n", "")
+    # 간단한 정규식 파싱 (외부 의존성 없이)
+    for m in re.finditer(r'<text[^>]*start="([\d\.]+)"[^>]*>(.*?)</text>', xml_text):
+        start = float(m.group(1))
+        # XML 안의 <br> 등 태그 제거 & 엔티티 디코딩
+        raw = re.sub(r"<.*?>", " ", m.group(2))
+        text = html.unescape(raw)
+        text = re.sub(r"\s+", " ", text).strip()
+        if text:
+            items.append((start, text))
+    return items
+
+def fetch_via_pytube(url_or_id: str, langs: List[str]) -> str:
+    """
+    pytube로 자막 트랙을 찾아서 xml/srt를 파싱.
+    자동생성 트랙은 보통 'a.xx' 코드.
+    """
+    yt = YouTube(url_or_id if url_or_id.startswith("http") else f"https://www.youtube.com/watch?v={url_or_id}")
+    tracks = yt.captions  # CaptionQuery
+
+    # 선호 언어 코드와 자동생성 코드 후보 구성
+    candidates = []
+    for lg in langs:
+        candidates.append(lg)        # 공식
+    for lg in langs:
+        candidates.append(f"a.{lg}") # 자동생성
+
+    # 추가 폴백: en, a.en
+    if "en" not in candidates: candidates += ["en", "a.en"]
+
+    # 사용가능한 코드 맵
+    available_codes = {c.code: c for c in tracks}
+
+    # 순서대로 시도
+    for code in candidates:
+        cap = available_codes.get(code)
+        if not cap:
+            # 일부 환경에서는 코드가 ko-KR처럼 지역코드 포함일 수 있어 시작 일치로 보조 매칭
+            for k, v in available_codes.items():
+                if k.lower().startswith(code.lower()):
+                    cap = v; break
+        if not cap:
+            continue
+
+        # srt가 되면 srt, 안 되면 xml 파싱
+        try:
+            try:
+                srt = cap.generate_srt_captions()
+                # SRT -> 간단 변환
+                lines = []
+                for block in srt.strip().split("\n\n"):
+                    parts = block.split("\n")
+                    if len(parts) >= 3:
+                        # 00:00:12,340 --> 00:00:15,120
+                        # 내용...
+                        # 시작 시간만 초로 대략 변환
+                        ts = parts[1].split("-->")[0].strip()
+                        h, m, s_ms = ts.split(":")
+                        s, ms = s_ms.split(",")
+                        start = int(h)*3600 + int(m)*60 + int(s) + int(ms)/1000.0
+                        text = " ".join(parts[2:]).strip()
+                        if text:
+                            lines.append(f"[{start:.1f}] {text}")
+                if lines:
+                    st.success(f"자막 확보(pytube-srt): {code}")
+                    return "\n".join(lines)
+            except Exception:
+                pass
+
+            xml = cap.xml_captions
+            items = clean_xml_text(xml)
+            if items:
+                st.success(f"자막 확보(pytube-xml): {code}")
+                return "\n".join([f"[{stt:.1f}] {txt}" for stt, txt in items])
+        except Exception:
+            continue
+
+    raise NoTranscriptFound("pytube: no caption track matched")
+
+# -----------------------------
+# 최종 래퍼 (재시도 포함)
+# -----------------------------
+def fetch_transcript_resilient(url: str, video_id: str, langs: List[str]) -> str:
+    # 1) yta 우선 → 실패 시 pytube 폴백
+    # 빈 응답/일시 오류 대비 재시도
+    attempts = 2
+    last_err = None
+
+    for i in range(attempts):
+        try:
+            return fetch_via_yta(video_id, langs)
+        except (NoTranscriptFound, TranscriptsDisabled, VideoUnavailable) as e:
+            last_err = e
+            break
+        except Exception as e:
+            last_err = e
+            time.sleep(0.7)
+
+    # pytube 폴백 (URL 사용)
+    attempts = 2
+    for i in range(attempts):
+        try:
+            return fetch_via_pytube(url, langs)
+        except Exception as e:
+            last_err = e
+            time.sleep(0.7)
+
+    # 여기까지 오면 실패
+    if isinstance(last_err, NoTranscriptFound):
+        raise NoTranscriptFound("자막을 찾을 수 없습니다.")
+    raise last_err or Exception("자막 처리 실패")
 
 # -----------------------------
 # Streamlit UI
@@ -100,7 +200,7 @@ if run:
         st.error("유효한 YouTube 링크가 아닙니다.")
         st.stop()
 
-    # (선택) 영상 메타 정보
+    # (선택) 영상 메타정보
     if show_meta:
         try:
             yt = YouTube(url)
@@ -110,36 +210,20 @@ if run:
         except Exception:
             st.caption("제목/길이 조회 실패 — 계속 진행합니다.")
 
-    # -------------------------
-    # 자막 가져오기 (재시도 포함)
-    # -------------------------
-    transcript_text = None
-    error_msg = None
-    attempts = 3
-
-    for i in range(1, attempts + 1):
-        try:
-            transcript_text = fetch_transcript_resilient(vid, lang_pref)
-            break
-        except NoTranscriptFound:
-            error_msg = "이 영상은 자막이 없거나 비활성화되어 있습니다. (무료판은 자막만 처리 가능)"
-            break
-        except TranscriptsDisabled:
-            error_msg = "이 영상은 자막 기능이 비활성화되어 있습니다."
-            break
-        except VideoUnavailable:
-            error_msg = "영상에 접근할 수 없습니다. (비공개, 지역/연령 제한 등)"
-            break
-        except Exception as e:
-            # 유튜브가 빈 응답/깨진 응답을 줄 때가 있어 잠깐 대기 후 재시도
-            if i < attempts:
-                time.sleep(0.8)
-                st.info(f"자막 재시도 중... ({i}/{attempts-1})")
-                continue
-            error_msg = f"자막 처리 중 오류: {e}"
-
-    if error_msg:
-        st.error(error_msg)
+    # 자막 가져오기 (재시도/폴백 포함)
+    try:
+        transcript_text = fetch_transcript_resilient(url, vid, lang_pref)
+    except NoTranscriptFound:
+        st.error("이 영상은 자막이 없거나 비활성화되어 있습니다. (무료판은 자막만 처리 가능합니다)")
+        st.stop()
+    except TranscriptsDisabled:
+        st.error("이 영상은 자막 기능이 비활성화되어 있습니다.")
+        st.stop()
+    except VideoUnavailable:
+        st.error("영상에 접근할 수 없습니다. (비공개, 지역/연령 제한 등)")
+        st.stop()
+    except Exception as e:
+        st.error(f"자막 처리 중 오류: {e}")
         st.stop()
 
     # 출력
