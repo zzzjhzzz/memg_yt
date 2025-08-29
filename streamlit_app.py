@@ -45,16 +45,29 @@ def to_clean_watch_url(url_or_id: str) -> str:
 
 
 # ---------------------------------
+# 예외 유틸: 일관된 NoTranscriptFound 발생
+# ---------------------------------
+def raise_no_transcript(langs: List[str]) -> None:
+    """
+    youtube_transcript_api.NoTranscriptFound 는
+    (requested_language_codes, transcript_data) 두 인자를 요구함.
+    """
+    raise NoTranscriptFound(langs, [])
+
+
+# ---------------------------------
 # 1) youtube_transcript_api (공식/자동생성)
 # ---------------------------------
 def fetch_via_yta(video_id: str, langs: List[str]) -> str:
     """업로더 자막 → 자동생성 자막 순으로 시도."""
     tl = YouTubeTranscriptApi.list_transcripts(video_id)
     try:
-        tr = tl.find_transcript(langs)          # 업로더 자막
+        tr = tl.find_transcript(langs)           # 업로더 자막
     except Exception:
         tr = tl.find_generated_transcript(langs) # 자동생성 자막
     entries = tr.fetch()
+    if not entries:
+        raise_no_transcript(langs)
     st.success(f"자막 확보(yta): lang={tr.language}, auto={tr.is_generated}")
     return "\n".join([f"[{e['start']:.1f}] {e['text']}" for e in entries])
 
@@ -136,7 +149,8 @@ def fetch_via_pytube(url_or_id: str, langs: List[str]) -> str:
         except Exception:
             continue
 
-    raise NoTranscriptFound("pytube: no caption track matched")
+    # 여기에 도달하면 pytube로는 찾지 못함
+    raise_no_transcript(langs)
 
 
 # ---------------------------------
@@ -218,7 +232,8 @@ def fetch_via_ytdlp(url_or_id: str, langs: List[str]) -> str:
         except Exception:
             continue
 
-    raise NoTranscriptFound("yt-dlp: no subtitle source matched")
+    # 여기까지 오면 yt-dlp 경로로도 실패
+    raise_no_transcript(langs)
 
 
 # ---------------------------------
