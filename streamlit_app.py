@@ -691,7 +691,7 @@ def fetch_transcript_resilient_enhanced(url: str, video_id: str, langs: List[str
         
         try:
             if method == "yta":
-                result = fetch_via_yta_with_enhanced_retry(video_id, langs)
+                result = fetch_via_yta_with_enhanced_retry(video_id, langs, max_retries)
             elif method == "ytdlp":
                 result = fetch_via_ytdlp_enhanced_stealth(url, langs)
             elif method == "pytube":
@@ -913,7 +913,7 @@ if run:
     # 자막 추출
     with st.spinner("🔍 자막 추출 중..."):
         try:
-            raw_transcript = fetch_transcript_resilient_enhanced(clean_url, vid, langs)
+            raw_transcript = fetch_transcript_resilient_enhanced(clean_url, vid, lang_pref)
         except TranscriptExtractionError as e:
             st.error(f"자막 추출 실패: {str(e)}")
             st.stop()
